@@ -1,0 +1,21 @@
+.row {
+  display: flex;
+  position: relative;
+}
+
+.rowInfo {
+  position: absolute;
+  left: -10px;
+  top: -12px;
+}
+
+.columnInfo {
+  position: absolute;
+  width: 100%;
+  display: flex;
+  left: 26px;
+}
+
+.columnInfo p {
+  margin-right: 20px;
+}
