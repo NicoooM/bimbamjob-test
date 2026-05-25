@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, type KeyboardEvent } from 'react'
+import { useState, useEffect, useMemo, type KeyboardEvent } from 'react'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
@@ -33,15 +33,12 @@ interface Field {
   object_type: string | null
 }
 
+interface Index {
+  [pkg: string]: string[]
+}
+
 type SortKey = 'name' | 'type' | 'category'
 type SortDir = 'asc' | 'desc'
-type CategoryFilter = string
-type EcsFilter = string
-
-interface Context {
-  pkg: string
-  ds: string
-}
 
 const TYPE_COLORS: Record<string, { text: string; dot: string }> = {
   keyword:   { text: 'text-blue-600',   dot: '#3b82f6' },
@@ -58,41 +55,48 @@ const TYPE_COLORS: Record<string, { text: string; dot: string }> = {
   flattened: { text: 'text-indigo-600', dot: '#4f46e5' },
 }
 
-function useUrlContext(): { pkg: string; ds: string } {
-  const params = new URLSearchParams(window.location.search)
-  const pkg = params.get('package') || ''
-  const ds = params.get('data_stream') || ''
-  return { pkg, ds }
-}
+// ── App ──────────────────────────────────────────────────────────────
 
 function App() {
-  const { pkg, ds } = useUrlContext()
-  const context: Context | null = pkg && ds ? { pkg, ds } : null
+  const [index, setIndex] = useState<Index>({})
+  const [selectedPkg, setSelectedPkg] = useState('')
+  const [selectedDs, setSelectedDs] = useState('')
 
   const [ecsFields, setEcsFields] = useState<Field[]>([])
   const [customFields, setCustomFields] = useState<Field[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const [query, setQuery] = useState('')
-  const [typeFilter, setTypeFilter] = useState<Set<string>>(new Set())
-  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all')
-  const [sortKey, setSortKey] = useState<SortKey>('name')
-  const [sortDir, setSortDir] = useState<SortDir>('asc')
-  const [page, setPage] = useState(0)
+  const hasContext = selectedPkg !== '' && selectedDs !== ''
 
+  useEffect(() => {
+    fetch('/registry/index.json')
+      .then(r => r.json())
+      .then(setIndex)
+      .catch(() => {})
+  }, [])
+
+  // Auto-select first data stream when package changes
+  useEffect(() => {
+    if (selectedPkg && index[selectedPkg]) {
+      const streams = index[selectedPkg]
+      if (!streams.includes(selectedDs)) {
+        setSelectedDs(streams[0] || '')
+      }
+    } else if (!selectedPkg) {
+      setSelectedDs('')
+    }
+  }, [selectedPkg, index])
+
+  // Load field data
   useEffect(() => {
     setLoading(true)
     setError(null)
-    setPage(0)
-    setQuery('')
-    setTypeFilter(new Set())
-    setCategoryFilter('all')
 
-    if (context) {
+    if (hasContext) {
       Promise.all([
         fetch('/registry/ecs.json').then(r => r.json()),
-        fetch(`/registry/${context.pkg}/${context.ds}.json`).then(r => {
+        fetch(`/registry/${selectedPkg}/${selectedDs}.json`).then(r => {
           if (!r.ok) throw new Error(`HTTP ${r.status}`)
           return r.json()
         }),
@@ -119,85 +123,20 @@ function App() {
           setLoading(false)
         })
     }
-  }, [context?.pkg, context?.ds])
+  }, [selectedPkg, selectedDs])
 
-  const { types, categories } = useMemo(() => {
-    const types = new Set<string>()
-    const categories = new Set<string>()
-    for (const f of ecsFields) { types.add(f.type); categories.add(f.category) }
-    for (const f of customFields) { types.add(f.type); categories.add(f.category) }
-    return { types: [...types].sort(), categories: [...categories].sort() }
-  }, [ecsFields, customFields])
+  const pkgList = Object.keys(index).sort()
+  const dsList = selectedPkg ? (index[selectedPkg] || []).sort() : []
 
-  function applyFilters(list: Field[]): Field[] {
-    let arr = list
-
-    if (query) {
-      const q = query.toLowerCase()
-      arr = arr.filter(f =>
-        f.name.toLowerCase().includes(q) ||
-        f.description.toLowerCase().includes(q)
-      )
-    }
-
-    if (typeFilter.size > 0) {
-      arr = arr.filter(f => typeFilter.has(f.type))
-    }
-
-    if (categoryFilter !== 'all') {
-      arr = arr.filter(f => f.category === categoryFilter)
-    }
-
-    arr = [...arr].sort((a, b) => {
-      let va: string | number | boolean = a[sortKey] ?? ''
-      let vb: string | number | boolean = b[sortKey] ?? ''
-      if (typeof va === 'boolean') { va = va ? 1 : 0; vb = vb ? 1 : 0 }
-      if (va < vb) return sortDir === 'asc' ? -1 : 1
-      if (va > vb) return sortDir === 'asc' ? 1 : -1
-      return 0
-    })
-
-    return arr
-  }
-
-  const filteredEcs = useMemo(
-    () => applyFilters(ecsFields),
-    [ecsFields, query, typeFilter, categoryFilter, sortKey, sortDir],
-  )
-  const filteredCustom = useMemo(
-    () => applyFilters(customFields),
-    [customFields, query, typeFilter, categoryFilter, sortKey, sortDir],
-  )
-
-  const totalFiltered = filteredEcs.length + filteredCustom.length
-
-  useEffect(() => { setPage(0) }, [query, typeFilter, categoryFilter])
-
-  function toggleSort(key: SortKey) {
-    if (sortKey === key) {
-      setSortDir(d => d === 'asc' ? 'desc' : 'asc')
-    } else {
-      setSortKey(key)
-      setSortDir('asc')
-    }
-  }
-
-  function toggleType(t: string) {
-    const next = new Set(typeFilter)
-    if (next.has(t)) next.delete(t)
-    else next.add(t)
-    setTypeFilter(next)
-  }
-
-  const title = context
-    ? `${context.pkg} / ${context.ds}`
+  const title = hasContext
+    ? `${selectedPkg} / ${selectedDs}`
     : 'ECS Field Catalog'
 
   return (
     <Sheet defaultOpen>
       <SheetTrigger asChild>
         <Button variant="outline" className="m-4">
-          {context ? `${context.pkg} / ${context.ds}` : 'ECS Field Catalog'}
+          {hasContext ? title : 'ECS Field Catalog'}
         </Button>
       </SheetTrigger>
       <SheetContent side="right" className="!w-[90vw] !max-w-[1200px] flex flex-col overflow-hidden">
@@ -205,10 +144,34 @@ function App() {
           <SheetTitle>{title}</SheetTitle>
         </SheetHeader>
         <div className="flex-1 overflow-y-auto -mx-4 px-4 space-y-4 pb-8">
-          {context && (
-            <a href="/" className="text-xs text-primary hover:underline inline-block">
-              &larr; Back to ECS Catalog
-            </a>
+          {/* Package / data stream picker */}
+          {pkgList.length > 0 && (
+            <div className="flex gap-3 items-center flex-wrap">
+              <Select value={selectedPkg || '--'} onValueChange={(v) => v && setSelectedPkg(v === '--' ? '' : v)}>
+                <SelectTrigger className="w-[200px]" aria-label="Select package">
+                  <SelectValue placeholder="No package" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="--">No package (ECS only)</SelectItem>
+                  {pkgList.map(p => (
+                    <SelectItem key={p} value={p}>{p}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {selectedPkg && (
+                <Select value={selectedDs || '--'} onValueChange={(v) => v && setSelectedDs(v === '--' ? '' : v)}>
+                  <SelectTrigger className="w-[200px]" aria-label="Select data stream">
+                    <SelectValue placeholder="Select data stream..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="--">No data stream</SelectItem>
+                    {dsList.map(d => (
+                      <SelectItem key={d} value={d}>{d}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
           )}
 
           {loading && (
@@ -223,7 +186,140 @@ function App() {
           )}
 
           {!loading && !error && (
-        <div className="px-6 py-4 space-y-4">
+            <div className="space-y-4">
+              {hasContext ? (
+                <>
+                  <FieldTable
+                    title="Custom Fields"
+                    subtitle={`${selectedPkg} / ${selectedDs}`}
+                    fields={customFields}
+                  />
+                  <FieldTable
+                    title="ECS Fields"
+                    subtitle="generic schema"
+                    fields={ecsFields}
+                    collapsed
+                  />
+                </>
+              ) : (
+                <FieldTable
+                  title="ECS Fields"
+                  subtitle={`${ecsFields.length} standard fields`}
+                  fields={ecsFields}
+                />
+              )}
+            </div>
+          )}
+        </div>
+      </SheetContent>
+    </Sheet>
+  )
+}
+
+// ── FieldTable ───────────────────────────────────────────────────────
+
+interface FieldTableProps {
+  title: string
+  subtitle: string
+  fields: Field[]
+  collapsed?: boolean
+}
+
+function FieldTable({ title, subtitle, fields, collapsed = false }: FieldTableProps) {
+  const [open, setOpen] = useState(!collapsed)
+  const [query, setQuery] = useState('')
+  const [typeFilter, setTypeFilter] = useState<Set<string>>(new Set())
+  const [categoryFilter, setCategoryFilter] = useState('all')
+  const [sortKey, setSortKey] = useState<SortKey>('name')
+  const [sortDir, setSortDir] = useState<SortDir>('asc')
+  const [page, setPage] = useState(0)
+
+  // Derive types/categories from fields
+  const { types, categories } = useMemo(() => {
+    const types = new Set<string>()
+    const cats = new Set<string>()
+    for (const f of fields) { types.add(f.type); cats.add(f.category) }
+    return { types: [...types].sort(), categories: [...cats].sort() }
+  }, [fields])
+
+  // Filter + sort
+  const filtered = useMemo(() => {
+    let arr = fields
+
+    if (query) {
+      const q = query.toLowerCase()
+      arr = arr.filter(f =>
+        f.name.toLowerCase().includes(q) || f.description.toLowerCase().includes(q)
+      )
+    }
+    if (typeFilter.size > 0) {
+      arr = arr.filter(f => typeFilter.has(f.type))
+    }
+    if (categoryFilter !== 'all') {
+      arr = arr.filter(f => f.category === categoryFilter)
+    }
+    arr = [...arr].sort((a, b) => {
+      let va: string | number | boolean = a[sortKey] ?? ''
+      let vb: string | number | boolean = b[sortKey] ?? ''
+      if (typeof va === 'boolean') { va = va ? 1 : 0; vb = vb ? 1 : 0 }
+      if (va < vb) return sortDir === 'asc' ? -1 : 1
+      if (va > vb) return sortDir === 'asc' ? 1 : -1
+      return 0
+    })
+    return arr
+  }, [fields, query, typeFilter, categoryFilter, sortKey, sortDir])
+
+  // Reset page when filters change
+  useEffect(() => { setPage(0) }, [query, typeFilter, categoryFilter])
+
+  function toggleSort(key: SortKey) {
+    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    else { setSortKey(key); setSortDir('asc') }
+  }
+
+  function toggleType(t: string) {
+    const next = new Set(typeFilter)
+    if (next.has(t)) next.delete(t)
+    else next.add(t)
+    setTypeFilter(next)
+  }
+
+  // Pagination
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const safePage = Math.min(page, totalPages - 1)
+  const pageFields = filtered.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE)
+  const start = safePage * PAGE_SIZE + 1
+  const end = Math.min(start + PAGE_SIZE - 1, filtered.length)
+
+  const sectionId = title.toLowerCase().replace(/\s+/g, '-')
+  const headerId = `${sectionId}-header`
+  const panelId = `${sectionId}-panel`
+
+  const handleKey = (e: KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(!open) }
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Collapsible header */}
+      <div
+        role="button"
+        tabIndex={0}
+        id={headerId}
+        aria-expanded={open}
+        aria-controls={panelId}
+        className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-card cursor-pointer select-none hover:bg-accent/50 transition-colors focus-visible:outline-2 focus-visible:outline-ring"
+        onClick={() => setOpen(!open)}
+        onKeyDown={handleKey}
+      >
+        <span className="text-muted-foreground text-xs w-4" aria-hidden="true">{open ? '▾' : '▸'}</span>
+        <span className="text-sm font-semibold text-foreground">{title}</span>
+        <span className="text-xs text-muted-foreground">{subtitle} &mdash; {fields.length} fields</span>
+      </div>
+
+      {open && (
+        <div id={panelId} role="region" aria-labelledby={headerId} className="space-y-3">
+          {/* Toolbar */}
           <div className="flex gap-3 items-center flex-wrap">
             <Input
               className="flex-1 min-w-[200px]"
@@ -232,11 +328,9 @@ function App() {
               value={query}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) => setQuery(e.target.value)}
             />
-
-            <span className="text-xs text-muted-foreground whitespace-nowrap" aria-live="polite">
-              {totalFiltered} fields
+            <span className="text-xs text-muted-foreground whitespace-nowrap">
+              {filtered.length} fields
             </span>
-
             <Select value={categoryFilter} onValueChange={(v) => v && setCategoryFilter(v)}>
               <SelectTrigger className="w-[160px]" aria-label="Filter by category">
                 <SelectValue placeholder="All categories" />
@@ -250,6 +344,7 @@ function App() {
             </Select>
           </div>
 
+          {/* Type chips */}
           <fieldset className="flex gap-1.5 flex-wrap border-0 p-0">
             <legend className="sr-only">Filter by field type</legend>
             {types.map(t => (
@@ -277,192 +372,19 @@ function App() {
             )}
           </fieldset>
 
-          {context ? (
-            <>
-              <FieldSection
-                title="Custom Fields"
-                subtitle={`${context.pkg}/${context.ds}`}
-                fields={filteredCustom}
-                sortKey={sortKey}
-                sortDir={sortDir}
-                onToggleSort={toggleSort}
-              />
-              <FieldSection
-                title="ECS Fields"
-                subtitle="generic schema"
-                fields={filteredEcs}
-                sortKey={sortKey}
-                sortDir={sortDir}
-                onToggleSort={toggleSort}
-                collapsed
-              />
-            </>
-          ) : (
-            <FieldSection
-              title="ECS Fields"
-              subtitle={`${ecsFields.length} standard fields`}
-              fields={filteredEcs}
-              sortKey={sortKey}
-              sortDir={sortDir}
-              onToggleSort={toggleSort}
-              page={page}
-              onPageChange={setPage}
-            />
-          )}
-        </div>
-      )}
-          </div>
-      </SheetContent>
-    </Sheet>
-  )
-}
-
-// --- Sub-components ---
-
-interface SortableHeaderProps {
-  label: string
-  sortKey: SortKey
-  activeKey: SortKey
-  dir: SortDir
-  onToggleSort: (key: SortKey) => void
-  className?: string
-}
-
-function SortableHeader({ label, sortKey, activeKey, dir, onToggleSort, className }: SortableHeaderProps) {
-  const isActive = activeKey === sortKey
-  const arrow = isActive ? (dir === 'asc' ? '↑' : '↓') : ''
-
-  return (
-    <TableHead
-      role="button"
-      tabIndex={0}
-      aria-label={`Sort by ${label}${isActive ? `, currently ${dir === 'asc' ? 'ascending' : 'descending'}` : ''}`}
-      className={`cursor-pointer hover:text-foreground transition-colors focus-visible:outline-2 focus-visible:outline-ring ${className || ''}`}
-      onClick={() => onToggleSort(sortKey)}
-      onKeyDown={(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggleSort(sortKey) } }}
-    >
-      {label}
-      {arrow && <span aria-hidden="true" className="text-[10px] ml-1">{arrow}</span>}
-    </TableHead>
-  )
-}
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
-
-  const handleCopy = useCallback(() => {
-    function doCopy(): Promise<void> {
-      if (navigator.clipboard?.writeText) {
-        return navigator.clipboard.writeText(text)
-      }
-      const ta = document.createElement('textarea')
-      ta.value = text
-      ta.style.position = 'fixed'
-      ta.style.left = '-9999px'
-      ta.style.top = '-9999px'
-      document.body.appendChild(ta)
-      ta.focus()
-      ta.select()
-      try { document.execCommand('copy') } catch { /* ignore */ }
-      document.body.removeChild(ta)
-      return Promise.resolve()
-    }
-    doCopy().then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    }).catch(() => {})
-  }, [text])
-
-  return (
-    <button
-      className={`inline-flex items-center gap-1 h-5 rounded px-1.5 transition-all duration-150 shrink-0
-        ${copied
-          ? 'bg-green-100 text-green-700 scale-105'
-          : 'opacity-0 group-hover:opacity-100 hover:bg-accent text-muted-foreground hover:text-foreground'
-        }
-        focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-ring`}
-      aria-label={copied ? 'Copied' : `Copy ${text} to clipboard`}
-      onClick={handleCopy}
-    >
-      {copied ? (
-        <>
-          <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M3 8l3.5 3.5L13 5" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-          <span className="text-[10px] font-medium">Copied</span>
-        </>
-      ) : (
-        <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-          <rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
-          <path d="M11 5V2.5a.5.5 0 00-.5-.5h-8a.5.5 0 00-.5.5v8a.5.5 0 00.5.5H5" stroke="currentColor" strokeWidth="1.5" />
-        </svg>
-      )}
-    </button>
-  )
-}
-
-interface FieldSectionProps {
-  title: string
-  subtitle: string
-  fields: Field[]
-  sortKey: SortKey
-  sortDir: SortDir
-  onToggleSort: (key: SortKey) => void
-  collapsed?: boolean
-  page?: number
-  onPageChange?: (page: number) => void
-}
-
-function FieldSection({
-  title, subtitle, fields, sortKey, sortDir, onToggleSort,
-  collapsed = false, page = 0, onPageChange,
-}: FieldSectionProps) {
-  const [open, setOpen] = useState(!collapsed)
-  const totalPages = Math.max(1, Math.ceil(fields.length / PAGE_SIZE))
-  const safePage = Math.min(page, totalPages - 1)
-  const pageFields = fields.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE)
-  const start = safePage * PAGE_SIZE + 1
-  const end = Math.min(start + PAGE_SIZE - 1, fields.length)
-
-  const sectionId = title.toLowerCase().replace(/\s+/g, '-')
-  const headerId = `${sectionId}-header`
-  const panelId = `${sectionId}-panel`
-
-  const handleKey = (e: KeyboardEvent) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(!open) }
-  }
-
-  return (
-    <div className="space-y-3">
-      <div
-        role="button"
-        tabIndex={0}
-        id={headerId}
-        aria-expanded={open}
-        aria-controls={panelId}
-        className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-card cursor-pointer select-none hover:bg-accent/50 transition-colors focus-visible:outline-2 focus-visible:outline-ring"
-        onClick={() => setOpen(!open)}
-        onKeyDown={handleKey}
-      >
-        <span className="text-muted-foreground text-xs w-4" aria-hidden="true">{open ? '▾' : '▸'}</span>
-        <span className="text-sm font-semibold text-foreground">{title}</span>
-        <span className="text-xs text-muted-foreground">{subtitle} &mdash; {fields.length} fields</span>
-      </div>
-
-      {open && (
-        <div id={panelId} role="region" aria-labelledby={headerId}>
+          {/* Table */}
           {totalPages > 1 && (
             <Pagination page={safePage} total={totalPages} start={start} end={end}
-              totalItems={fields.length} onChange={onPageChange!} />
+              totalItems={filtered.length} onChange={setPage} />
           )}
 
           <div className="rounded-lg border border-border overflow-hidden">
             <Table className="table-fixed">
               <TableHeader>
                 <TableRow>
-                  <SortableHeader label="Name" sortKey="name" activeKey={sortKey} dir={sortDir} onToggleSort={onToggleSort} className="w-[45%]" />
-                  <SortableHeader label="Type" sortKey="type" activeKey={sortKey} dir={sortDir} onToggleSort={onToggleSort} className="w-[14%]" />
-                  <SortableHeader label="Cat" sortKey="category" activeKey={sortKey} dir={sortDir} onToggleSort={onToggleSort} className="hidden md:table-cell w-[10%]" />
+                  <SortableHeader label="Name" sortKey="name" activeKey={sortKey} dir={sortDir} onToggleSort={toggleSort} className="w-[45%]" />
+                  <SortableHeader label="Type" sortKey="type" activeKey={sortKey} dir={sortDir} onToggleSort={toggleSort} className="w-[14%]" />
+                  <SortableHeader label="Cat" sortKey="category" activeKey={sortKey} dir={sortDir} onToggleSort={toggleSort} className="hidden md:table-cell w-[10%]" />
                   <TableHead className="hidden md:table-cell w-[22%]">Description</TableHead>
                   <TableHead className="hidden md:table-cell w-[9%]">Unit / Metric</TableHead>
                 </TableRow>
@@ -509,13 +431,101 @@ function FieldSection({
 
           {totalPages > 1 && (
             <Pagination page={safePage} total={totalPages} start={start} end={end}
-              totalItems={fields.length} onChange={onPageChange!} />
+              totalItems={filtered.length} onChange={setPage} />
           )}
         </div>
       )}
     </div>
   )
 }
+
+// ── SortableHeader ───────────────────────────────────────────────────
+
+interface SortableHeaderProps {
+  label: string
+  sortKey: SortKey
+  activeKey: SortKey
+  dir: SortDir
+  onToggleSort: (key: SortKey) => void
+  className?: string
+}
+
+function SortableHeader({ label, sortKey, activeKey, dir, onToggleSort, className }: SortableHeaderProps) {
+  const isActive = activeKey === sortKey
+  const arrow = isActive ? (dir === 'asc' ? '↑' : '↓') : ''
+
+  return (
+    <TableHead
+      role="button"
+      tabIndex={0}
+      aria-label={`Sort by ${label}${isActive ? `, currently ${dir === 'asc' ? 'ascending' : 'descending'}` : ''}`}
+      className={`cursor-pointer hover:text-foreground transition-colors focus-visible:outline-2 focus-visible:outline-ring ${className || ''}`}
+      onClick={() => onToggleSort(sortKey)}
+      onKeyDown={(e: KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggleSort(sortKey) } }}
+    >
+      {label}
+      {arrow && <span aria-hidden="true" className="text-[10px] ml-1">{arrow}</span>}
+    </TableHead>
+  )
+}
+
+// ── CopyButton ───────────────────────────────────────────────────────
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = () => {
+    function doCopy(): Promise<void> {
+      if (navigator.clipboard?.writeText) {
+        return navigator.clipboard.writeText(text)
+      }
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.left = '-9999px'
+      ta.style.top = '-9999px'
+      document.body.appendChild(ta)
+      ta.focus()
+      ta.select()
+      try { document.execCommand('copy') } catch { /* ignore */ }
+      document.body.removeChild(ta)
+      return Promise.resolve()
+    }
+    doCopy().then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    }).catch(() => {})
+  }
+
+  return (
+    <button
+      className={`inline-flex items-center gap-1 h-5 rounded px-1.5 transition-all duration-150 shrink-0
+        ${copied
+          ? 'bg-green-100 text-green-700 scale-105'
+          : 'opacity-0 group-hover:opacity-100 hover:bg-accent text-muted-foreground hover:text-foreground'
+        }
+        focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-ring`}
+      aria-label={copied ? 'Copied' : `Copy ${text} to clipboard`}
+      onClick={handleCopy}
+    >
+      {copied ? (
+        <>
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M3 8l3.5 3.5L13 5" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          <span className="text-[10px] font-medium">Copied</span>
+        </>
+      ) : (
+        <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.5" />
+          <path d="M11 5V2.5a.5.5 0 00-.5-.5h-8a.5.5 0 00-.5.5v8a.5.5 0 00.5.5H5" stroke="currentColor" strokeWidth="1.5" />
+        </svg>
+      )}
+    </button>
+  )
+}
+
+// ── Pagination ───────────────────────────────────────────────────────
 
 interface PaginationProps {
   page: number
@@ -535,9 +545,7 @@ function Pagination({ page, total, start, end, totalItems, onChange }: Paginatio
   let pEnd = Math.min(total, pStart + maxVisible)
   if (pEnd - pStart < maxVisible) pStart = Math.max(0, pEnd - maxVisible)
 
-  for (let i = pStart; i < pEnd; i++) {
-    pages.push(i)
-  }
+  for (let i = pStart; i < pEnd; i++) pages.push(i)
 
   return (
     <nav aria-label="Pagination" className="flex items-center justify-between gap-3 flex-wrap py-2">
